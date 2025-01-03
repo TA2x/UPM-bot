@@ -12,7 +12,6 @@ import pyfiglet
 import json
 import os
 import asyncio
-from discord import app_commands
 
 # File to store user data
 USER_DATA_FILE = "user_data.json"
@@ -35,24 +34,18 @@ session = requests.Session()
 Digi_session = requests.Session()
 login_response = None
 
-@app_commands.command(name="test", description="A test command")
-async def test(interaction: discord.Interaction):
-    await interaction.response.send_message("Hello! This is a test command.")
-
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user.name}!")
 
-# Add to bot tree
 @bot.event
 async def on_ready():
-    bot.tree.add_command(test)  # Register the command
-    await bot.tree.sync()  # Sync to the server
-    print("Commands synced successfully.")
+    try:
+        synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} commands to the server.")
+    except Exception as e:
+        print(f"Error syncing commands: {e}")
 
-@bot.command(name="ping")
-async def ping(ctx):
-    await ctx.send("Pong!")
 
 @bot.event
 async def on_message(message):
@@ -191,41 +184,6 @@ async def advisor(ctx):
         await ctx.send(f"Your academic advisor is: {advisor_name}")
     else:
         await ctx.send("Unable to fetch advisor details.")
-
-@bot.command()
-async def grades(ctx):
-    """Fetch and display grades for the user."""
-    if not login_response:
-        await ctx.send("Please log in first using the `/login` command.")
-        return
-
-    grades_url = "https://sis.upm.edu.sa/path/to/grades/endpoint"
-    response = session.get(grades_url)
-    
-    if response.status_code == 200:
-        grades_data = response.json()
-        # Process grades and format a message
-        grades_message = "Here are your grades:\n"
-        for course in grades_data:
-            grades_message += f"{course['course_code']} - {course['course_name']}: {course['grade']}\n"
-        await ctx.send(grades_message)
-    else:
-        await ctx.send("Unable to fetch grades at the moment.")
-
-@bot.command()
-async def announcements(ctx):
-    """Fetch and display recent announcements."""
-    announcements_url = "https://sis.upm.edu.sa/path/to/announcements/endpoint"
-    response = session.get(announcements_url)
-
-    if response.status_code == 200:
-        announcements = response.json()
-        message = "**Recent Announcements:**\n"
-        for announcement in announcements:
-            message += f"- {announcement['title']}: {announcement['date']}\n{announcement['description']}\n"
-        await ctx.send(message)
-    else:
-        await ctx.send("Unable to fetch announcements.")
 
 @bot.command()
 async def attendance(ctx):

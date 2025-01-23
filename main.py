@@ -15,6 +15,7 @@ import asyncio
 
 # File to store user data
 USER_DATA_FILE = "user_data.json"
+LOGGED_IN_USERS_FILE = "logged_in_users.json"
 
 # Load or initialize user data
 if os.path.exists(USER_DATA_FILE):
@@ -22,6 +23,18 @@ if os.path.exists(USER_DATA_FILE):
         user_data = json.load(file)
 else:
     user_data = {}
+
+# Load or initialize logged-in users data
+if os.path.exists(LOGGED_IN_USERS_FILE):
+    with open(LOGGED_IN_USERS_FILE, "r") as file:
+        logged_in_users = json.load(file)
+else:
+    logged_in_users = {}
+
+# Save logged-in users data to file
+def save_logged_in_users():
+    with open(LOGGED_IN_USERS_FILE, "w") as file:
+        json.dump(logged_in_users, file)
 
 # Initialize Discord bot
 intents = discord.Intents.default()
@@ -45,7 +58,6 @@ async def on_ready():
         print(f"Synced {len(synced)} commands to the server.")
     except Exception as e:
         print(f"Error syncing commands: {e}")
-
 
 @bot.event
 async def on_message(message):
@@ -98,6 +110,11 @@ async def login(ctx, student_id: str = None, password: str = None, digi_password
 
     user_id = str(ctx.author.id)
 
+    # Check if the user is already logged in
+    if user_id in logged_in_users:
+        await ctx.send("You are already logged in on another session. Please log out first using the `/logout` command before logging in again.")
+        return
+
     # Use saved login info if available
     if user_id in user_data and not (student_id and password and digi_password):
         student_id = user_data[user_id]["student_id"]
@@ -135,7 +152,23 @@ async def login(ctx, student_id: str = None, password: str = None, digi_password
         'authorization': f"Bearer {login_response['tokens']['access']['token']}",
     })
 
+    # Mark the user as logged in
+    logged_in_users[user_id] = True
+    save_logged_in_users()
+
     await ctx.send(f"Logged in successfully as {student_id}!")
+
+@bot.command()
+async def logout(ctx):
+    """Command to log out the user."""
+    user_id = str(ctx.author.id)
+
+    if user_id in logged_in_users:
+        del logged_in_users[user_id]
+        save_logged_in_users()
+        await ctx.send("You have been logged out successfully.")
+    else:
+        await ctx.send("You are not logged in.")
 
 @bot.command()
 async def schedule(ctx):
@@ -145,27 +178,44 @@ async def schedule(ctx):
         return
 
     weekdays = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday']
-    week_dates = [(datetime.now().date() - timedelta(days=datetime.now().weekday() + 1) + timedelta(days=i)).isoformat() for i in range(5)]
+    week_dates = [
+        (datetime.now().date() - timedelta(days=datetime.now().weekday() + 1) + timedelta(days=i)).isoformat() 
+        for i in range(5)
+    ]
 
     schedules = {}
     for i, day in enumerate(weekdays):
         url = f"https://dsapi.produpm.digi-val.com/api/v1/digiclass/course_session/get-schedule-by-date/{login_response['_id']}/{week_dates[i]}T21:00:00Z?timeZone=Asia/Riyadh"
-        response = Digi_session.get(url).json()
-        schedules[day] = response.get('data', [])
+        try:
+            response = Digi_session.get(url).json()
+            schedules[day] = response.get('data', [])
+        except Exception as e:
+            await ctx.send(f"Error fetching schedule for {day}: {e}")
+            return
 
     for day, lectures in schedules.items():
         schedule_msg = f"**{day} Schedule:**\n"
         if lectures:
             for lecture in lectures:
-                course = lecture.get('course_code', '-')
-                course_name = lecture.get('course_name', '-')
-                start_time = f"{lecture['start']['hour']}:{lecture['start']['minute']}{lecture['start']['format']}"
-                end_time = f"{lecture['end']['hour']}:{lecture['end']['minute']}{lecture['end']['format']}"
-                schedule_msg += f"{course}: {course_name} ({start_time} - {end_time})\n"
+                try:
+                    course = lecture.get('course_code', '-')
+                    course_name = lecture.get('course_name', '-')
+                    start_time = f"{lecture['start']['hour']}:{lecture['start']['minute']}{lecture['start']['format']}"
+                    end_time = f"{lecture['end']['hour']}:{lecture['end']['minute']}{lecture['end']['format']}"
+                    schedule_msg += f"{course}: {course_name} ({start_time} - {end_time})\n"
+                except KeyError as e:
+                    schedule_msg += f"Error parsing lecture details: {e}\n"
         else:
             schedule_msg += "No classes scheduled.\n"
-        await ctx.send(schedule_msg)
+        
+        # Send messages in chunks if necessary
+        if len(schedule_msg) > 2000:
+            for chunk in [schedule_msg[i:i+2000] for i in range(0, len(schedule_msg), 2000)]:
+                await ctx.send(chunk)
+        else:
+            await ctx.send(schedule_msg)
 
+# Other commands remain unchanged
 @bot.command()
 async def advisor(ctx):
     """Command to fetch the academic advisor."""
@@ -287,5 +337,7 @@ async def remind(ctx, time: int, *, reminder):
     await asyncio.sleep(time * 60)
     await ctx.send(f"⏰ Reminder: {reminder}")
 
+# Run the bot
+bot.run("MTMyNDEyMjY4NTk1NzA3OTE1Mg.Gw3xTb.TN2Xxdw7VEl5a_jdfzFAmR3OrLfJZkXt4MBcJo")
 # Run the bot
 bot.run("MTMyNDEyMjY4NTk1NzA3OTE1Mg.Gw3xTb.TN2Xxdw7VEl5a_jdfzFAmR3OrLfJZkXt4MBcJo")

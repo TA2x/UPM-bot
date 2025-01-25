@@ -219,28 +219,32 @@ async def courses(ctx):
     global login_responses
     user_id = str(ctx.author.id)
 
+    # Check if user is logged in
     if user_id not in login_responses:
         await ctx.send("You need to log in first using the `/login` command.")
         return
 
+    # URL to fetch courses
     courses_url = "https://digiclass.upm.digi-val.com/courses"
 
     try:
+        # Make a GET request to fetch courses
         response = Digi_session.get(courses_url).json()
-        if response['status']:
+        
+        if response.get('status', False):  # Check response status
             table_data = []
-            for item in response['data']:
+            for item in response.get('data', []):
                 course_id = item.get('course_id', 'N/A')
                 course_name = item.get('course_name', 'N/A')
                 table_data.append([course_id, course_name])
 
+            # Format the table and send it to the user
             table = tabulate(table_data, headers=['Course ID', 'Course Name'], tablefmt='grid')
-            await ctx.send(f"```
-{table}
-```")
+            await ctx.send(f"```\n{table}\n```")  # Use code block for better formatting
         else:
             await ctx.send("Failed to fetch courses. Please try again later.")
     except Exception as e:
+        # Handle any errors during the API call
         await ctx.send(f"Error fetching courses: {str(e)}")
 
 @bot.command()
@@ -265,9 +269,7 @@ async def grades(ctx):
                 table_data.append([course_name, grade])
 
             table = tabulate(table_data, headers=['Course', 'Grade'], tablefmt='grid')
-            await ctx.send(f"```
-{table}
-```")
+            await ctx.send(f"```\n{table}\n```")
         else:
             await ctx.send("Failed to fetch grades. Please try again later.")
     except Exception as e:

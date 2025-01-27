@@ -47,14 +47,29 @@ session = requests.Session()
 Digi_session = requests.Session()
 login_response = {}
 
+# On ready, sync commands with the server
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user.name}!")
     try:
-        synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} commands to the server.")
+        synced = await bot.tree.sync()  # Sync slash commands
+        print(f"Synced {len(synced)} command(s)")
     except Exception as e:
         print(f"Error syncing commands: {e}")
+    print(f"Bot {bot.user} is online!")
+
+# Define a slash command
+@bot.tree.command(name="active-dev-badge", description="Show an active developer badge!")
+async def active_dev_badge(interaction: discord.Interaction):
+    # Custom response for the badge-like appearance
+    embed = discord.Embed(
+        title="Active Developer Badge",
+        description="**You used the Active Developer Badge command! 🛠️**",
+        color=discord.Color.blue()
+    )
+    embed.set_footer(text="testerSA APP")
+    embed.set_thumbnail(url="https://cdn.discordapp.com/emojis/1068576796805154916.png")  # Replace with your emoji/image URL
+
+    await interaction.response.send_message(embed=embed)
 
 @bot.event
 async def on_message(message):
@@ -257,8 +272,13 @@ async def grades(ctx):
         await ctx.send("You need to log in first using the `/login` command.")
         return
 
-    grades_url = "https://dsapi.produpm.digi-val.com/api/v1/digiclass/grades"  # Replace with actual grades endpoint
+    grades_url = r"https://sis.upm.edu.sa/psc/ps/EMPLOYEE/SA/c/SA_LEARNER_SERVICES.SSR_SSENRL_GRADE.GBL?PortalActualURL=https%3a%2f%2fsis.upm.edu.sa%2fpsc%2fps%2fEMPLOYEE%2fSA%2fc%2fSA_LEARNER_SERVICES.SSR_SSENRL_GRADE.GBL&PortalContentURL=https%3a%2f%2fsis.upm.edu.sa%2fpsc%2fps%2fEMPLOYEE%2fSA%2fc%2fSA_LEARNER_SERVICES.SSR_SSENRL_GRADE.GBL&PortalContentProvider=SA&PortalCRefLabel=View%20My%20Grades&PortalRegistryName=EMPLOYEE&PortalServletURI=https%3a%2f%2fsis.upm.edu.sa%2fpsp%2fps%2f&PortalURI=https%3a%2f%2fsis.upm.edu.sa%2fpsc%2fps%2f&PortalHostNode=HRMS&NoCrumbs=yes&PortalKeyStruct=yes"  # Replace with actual grades endpoint
+    
+    info = session.get(grades_url)
 
+    soup = BeautifulSoup(info.content, "html.parser")
+
+    tree = etree.HTML(str(soup))
     try:
         response = Digi_session.get(grades_url).json()
         if response['status']:

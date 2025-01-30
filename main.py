@@ -1,429 +1,360 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-from termcolor import colored
 from bs4 import BeautifulSoup
 from lxml import etree
-from tabulate import tabulate
-from colorama import Fore, Style, init
 from datetime import datetime, timedelta
 import requests
-import pyfiglet
 import json
 import os
 import asyncio
+import logging
 
-# File to store user data
+# Initialize logging
+logging.basicConfig(level=logging.INFO)
+
+# File paths
 USER_DATA_FILE = "user_data.json"
 LOGGED_IN_USERS_FILE = "logged_in_users.json"
 
-# Load or initialize user data
-if os.path.exists(USER_DATA_FILE):
-    with open(USER_DATA_FILE, "r") as file:
-        user_data = json.load(file)
-else:
-    user_data = {}
+# Load or initialize data stores
+user_data = {}
+logged_in_users = {}
+user_sessions = {}  # Stores individual user sessions
 
-# Load or initialize logged-in users data
-if os.path.exists(LOGGED_IN_USERS_FILE):
-    with open(LOGGED_IN_USERS_FILE, "r") as file:
-        logged_in_users = json.load(file)
-else:
-    logged_in_users = {}
+try:
+    with open(USER_DATA_FILE, "r") as f:
+        user_data = json.load(f)
+except FileNotFoundError:
+    pass
 
-# Save logged-in users data to file
-def save_logged_in_users():
-    with open(LOGGED_IN_USERS_FILE, "w") as file:
-        json.dump(logged_in_users, file)
+try:
+    with open(LOGGED_IN_USERS_FILE, "r") as f:
+        logged_in_users = json.load(f)
+except FileNotFoundError:
+    pass
 
-# Initialize Discord bot
+# Initialize bot with proper intents
 intents = discord.Intents.default()
-intents.messages = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="/", intents=intents)
 
-# Global session objects
-session = requests.Session()
-Digi_session = requests.Session()
-login_response = {}
+def save_data():
+    """Save all persistent data"""
+    with open(USER_DATA_FILE, "w") as f:
+        json.dump(user_data, f)
+    with open(LOGGED_IN_USERS_FILE, "w") as f:
+        json.dump(logged_in_users, f)
 
-# On ready, sync commands with the server
 @bot.event
 async def on_ready():
+    """Handle bot startup"""
+    print(f"✅ Bot ready as {bot.user.name} ({bot.user.id})")
     try:
-        synced = await bot.tree.sync()  # Sync slash commands
-        print(f"Synced {len(synced)} command(s)")
+        synced = await bot.tree.sync()
+        print(f"🔁 Synced {len(synced)} commands")
     except Exception as e:
-        print(f"Error syncing commands: {e}")
-    print(f"Bot {bot.user} is online!")
-
-# Define a slash command
-@bot.tree.command(name="active-dev-badge", description="Show an active developer badge!")
-async def active_dev_badge(interaction: discord.Interaction):
-    # Custom response for the badge-like appearance
-    embed = discord.Embed(
-        title="Active Developer Badge",
-        description="**You used the Active Developer Badge command! 🛠️**",
-        color=discord.Color.blue()
-    )
-    embed.set_footer(text="testerSA APP")
-    embed.set_thumbnail(url="https://cdn.discordapp.com/emojis/1068576796805154916.png")  # Replace with your emoji/image URL
-
-    await interaction.response.send_message(embed=embed)
+        print(f"❌ Command sync error: {e}")
 
 @bot.event
 async def on_message(message):
-    """Handle messages to check for user login information."""
-    if message.author.bot:
+    """Handle login info collection"""
+    if message.author.bot or not isinstance(message.channel, discord.DMChannel):
+        await bot.process_commands(message)
         return
 
     user_id = str(message.author.id)
-
-    # Check if user info is already saved
-    if user_id not in user_data:
-        try:
-            # Send a DM asking for login info
-            dm_channel = await message.author.create_dm()
-            await dm_channel.send("Hi! Please provide your login info. Reply with the following format: `student_id,password,digi_password`")
-
-            # Wait for user response
-            def check(msg):
-                return msg.author == message.author and isinstance(msg.channel, discord.DMChannel)
-
+    
+    try:
+        if user_id not in user_data:
+            await message.author.send("🔑 Please send your credentials in format: `student_id,password,digi_password`")
+            
+            def check(m):
+                return m.author == message.author and isinstance(m.channel, discord.DMChannel)
+            
             try:
-                login_msg = await bot.wait_for('message', check=check, timeout=120)  # 2-minute timeout
-                login_info = login_msg.content.split(",")
-
-                if len(login_info) != 3:
-                    await dm_channel.send("Invalid format. Please use the format: `student_id,password,digi_password`.")
-                    return
-
-                # Save user info
+                creds = await bot.wait_for('message', check=check, timeout=120)
+                student_id, password, digi_password = creds.content.strip().split(',')
+                
                 user_data[user_id] = {
-                    "student_id": login_info[0],
-                    "password": login_info[1],
-                    "digi_password": login_info[2]
+                    "student_id": student_id,
+                    "password": password,
+                    "digi_password": digi_password
                 }
-                with open(USER_DATA_FILE, "w") as file:
-                    json.dump(user_data, file)
-
-                await dm_channel.send("Thank you! Your info has been saved.")
+                save_data()
+                await message.author.send("✅ Credentials saved securely")
+                
             except asyncio.TimeoutError:
-                await dm_channel.send("You took too long to respond. Please try again later.")
-        except Exception as e:
-            await message.channel.send(f"Failed to send a DM: {str(e)}")
-
+                await message.author.send("⌛ Timeout: Please try again later")
+            except ValueError:
+                await message.author.send("❌ Invalid format. Use: student_id,password,digi_password")
+    
+    except Exception as e:
+        logging.error(f"DM error: {str(e)}")
+    
     await bot.process_commands(message)
 
 @bot.command()
-async def login(ctx, student_id: str = None, password: str = None, digi_password: str = None):
-    """Command to log in and establish sessions."""
-    global login_response
-
+async def login(ctx):
+    """User login handler"""
     user_id = str(ctx.author.id)
-
-    # Check if the user is already logged in
+    
     if user_id in logged_in_users:
-        await ctx.send("You are already logged in.")
+        await ctx.send("⚠️ You're already logged in!")
         return
+    
+    try:
+        creds = user_data.get(user_id)
+        if not creds:
+            await ctx.send("❌ No credentials found. Send them via DM first")
+            return
+        
+        # Create individual sessions
+        user_sessions[user_id] = {
+            "sis": requests.Session(),
+            "digi": requests.Session(),
+            "data": None
+        }
+        
+        # SIS Login
+        sis_login = user_sessions[user_id]["sis"].post(
+            "https://sis.upm.edu.sa/psp/ps/?=&cmd=login&languageCd=ENG",
+            data={"userid": creds["student_id"], "pwd": creds["password"]},
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        
+        if "login" in sis_login.url:
+            await ctx.send("❌ Invalid SIS credentials")
+            return
+        
+        # DigiVal Login
+        digi_login = user_sessions[user_id]["digi"].post(
+            "https://dsapi.produpm.digi-val.com/api/v1/digiclass/user/authLogin",
+            data={
+                "email": f"{creds['student_id']}@upm.edu.sa",
+                "password": creds["digi_password"],
+                "device_type": "web"
+            }
+        ).json()
+        
+        if not digi_login.get('status'):
+            await ctx.send("❌ Invalid DigiVal credentials")
+            return
+        
+        # Store session data
+        user_sessions[user_id]["data"] = digi_login['data']
+        user_sessions[user_id]["digi"].headers.update({
+            "authorization": f"Bearer {digi_login['data']['tokens']['access']['token']}",
+            "_user_id": digi_login['data']['_id']
+        })
+        
+        logged_in_users[user_id] = True
+        save_data()
+        await ctx.send(f"✅ Logged in as {creds['student_id']}")
+        
+    except Exception as e:
+        logging.error(f"Login error: {str(e)}")
+        await ctx.send("🔴 Login failed - contact support")
 
-    # Use saved login info if available
-    if user_id in user_data and not (student_id and password and digi_password):
-        student_id = user_data[user_id]["student_id"]
-        password = user_data[user_id]["password"]
-        digi_password = user_data[user_id]["digi_password"]
-
-    if not (student_id and password and digi_password):
-        await ctx.send("Please provide your login info using `/login student_id password digi_password`.")
-        return
-
-    # SIS Login
-    login_url = "https://sis.upm.edu.sa/psp/ps/?=&cmd=login&languageCd=ENG"
-    payload = {"userid": student_id, "pwd": password}
-    headers = {'User-agent': 'Mozilla/5.0'}
-    response = session.post(login_url, data=payload, headers=headers)
-
-    # Check SIS login
-    if "login" in response.url:
-        await ctx.send("Your ID/Password is invalid for SIS!")
-        return
-
-    # DigiVal Login
-    payload_ = {'email': f"{student_id}@upm.edu.sa", 'password': digi_password, 'device_type': "web"}
-    Login_url = "https://dsapi.produpm.digi-val.com/api/v1/digiclass/user/authLogin"
-    login_response[user_id] = Digi_session.post(Login_url, data=payload_).json()
-
-    if not login_response[user_id]['status']:
-        await ctx.send("Your ID/Password is invalid for DigiVal!")
-        return
-
-    user_data[user_id].update({
-        'Digi_id': login_response[user_id]['data']['_id'],
-        'tokens': login_response[user_id]['data']['tokens']['access']['token']
-    })
-
-    Digi_session.headers.update({
-        'user-agent': 'Mozilla/5.0',
-        '_user_id': user_data[user_id]['Digi_id'],
-        'authorization': f"Bearer {user_data[user_id]['tokens']}"
-    })
-
-    # Mark the user as logged in
-    logged_in_users[user_id] = True
-    save_logged_in_users()
-
-    await ctx.send(f"Logged in successfully as {student_id}!")
+@bot.command()
+async def logout(ctx):
+    """User logout handler"""
+    user_id = str(ctx.author.id)
+    
+    if user_id in logged_in_users:
+        # Clear all session data
+        user_sessions.pop(user_id, None)
+        logged_in_users.pop(user_id, None)
+        save_data()
+        await ctx.send("✅ Logged out successfully")
+    else:
+        await ctx.send("⚠️ You're not logged in")
 
 @bot.command()
 async def schedule(ctx):
-    """Fetch and display the weekly schedule."""
-    global login_response
-
-    # Check if the user is logged in
-    if not login_response:
-        await ctx.send("⛔ Please log in first using the `/login` command.")
-        return
-
-    weekdays = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday']
-    today = datetime.now().date()
-    week_dates = [
-        (today - timedelta(days=today.weekday()) + timedelta(days=i)).isoformat()
-        for i in range(5)
-    ]
-
-    user_id = login_response['_id']
-    timezone = "Asia/Riyadh"
-    base_url = "https://dsapi.produpm.digi-val.com/api/v1/digiclass/course_session/get-schedule-by-date"
-    schedules = {}
-    for i, day in enumerate(weekdays):
-        url = f"https://dsapi.produpm.digi-val.com/api/v1/digiclass/course_session/get-schedule-by-date/{login_response['_id']}/{week_dates[i]}T21:00:00Z?timeZone=Asia/Riyadh"
-        try:
-            response = Digi_session.get(url)
-            response.raise_for_status()
-            day_data = response.json()
-            schedules[day] = day_data.get('data', [])
-        except requests.exceptions.RequestException as e:
-            await ctx.send(f"⛔ Error fetching schedule for {day}: {e}")
-            return
-
-    for day, lectures in schedules.items():
-        schedule_msg = f"**{day} Schedule:**\n"
-        if lectures:
-            for lecture in lectures:
-                try:
-                    course = lecture.get('course_code', 'Unknown Code')
-                    course_name = lecture.get('course_name', 'Unknown Course')
-                    start_time = f"{lecture['start']['hour']}:{lecture['start']['minute']}{lecture['start']['format']}"
-                    end_time = f"{lecture['end']['hour']}:{lecture['end']['minute']}{lecture['end']['format']}"
-                    schedule_msg += f"**{course}**: {course_name} ({start_time} - {end_time})\n"
-                except KeyError as e:
-                    schedule_msg += f"Error parsing lecture details: {e}\n"
-        else:
-            schedule_msg += "No classes scheduled.\n"
-
-        # Split large messages into chunks to avoid hitting the 2000-character limit
-        if len(schedule_msg) > 2000:
-            for chunk in [schedule_msg[i:i+2000] for i in range(0, len(schedule_msg), 2000)]:
-                await ctx.send(chunk)
-        else:
-            await ctx.send(schedule_msg)
-
-@bot.command()
-async def courses(ctx):
-    """Fetches the courses for the student."""
-    global login_responses
+    """Get class schedule"""
     user_id = str(ctx.author.id)
-
-    # Check if user is logged in
-    if user_id not in login_responses:
-        await ctx.send("You need to log in first using the `/login` command.")
-        return
-
-    # URL to fetch courses
-    courses_url = "https://digiclass.upm.digi-val.com/courses"
-
-    try:
-        # Make a GET request to fetch courses
-        response = Digi_session.get(courses_url).json()
-        
-        if response.get('status', False):  # Check response status
-            table_data = []
-            for item in response.get('data', []):
-                course_id = item.get('course_id', 'N/A')
-                course_name = item.get('course_name', 'N/A')
-                table_data.append([course_id, course_name])
-
-            # Format the table and send it to the user
-            table = tabulate(table_data, headers=['Course ID', 'Course Name'], tablefmt='grid')
-            await ctx.send(f"```\n{table}\n```")  # Use code block for better formatting
-        else:
-            await ctx.send("Failed to fetch courses. Please try again later.")
-    except Exception as e:
-        # Handle any errors during the API call
-        await ctx.send(f"Error fetching courses: {str(e)}")
-
-@bot.command()
-async def grades(ctx):
-    """Fetches the student's grades."""
-    global login_responses
-    user_id = str(ctx.author.id)
-
-    if user_id not in login_responses:
-        await ctx.send("You need to log in first using the `/login` command.")
-        return
-
-    grades_url = r"https://sis.upm.edu.sa/psc/ps/EMPLOYEE/SA/c/SA_LEARNER_SERVICES.SSR_SSENRL_GRADE.GBL?PortalActualURL=https%3a%2f%2fsis.upm.edu.sa%2fpsc%2fps%2fEMPLOYEE%2fSA%2fc%2fSA_LEARNER_SERVICES.SSR_SSENRL_GRADE.GBL&PortalContentURL=https%3a%2f%2fsis.upm.edu.sa%2fpsc%2fps%2fEMPLOYEE%2fSA%2fc%2fSA_LEARNER_SERVICES.SSR_SSENRL_GRADE.GBL&PortalContentProvider=SA&PortalCRefLabel=View%20My%20Grades&PortalRegistryName=EMPLOYEE&PortalServletURI=https%3a%2f%2fsis.upm.edu.sa%2fpsp%2fps%2f&PortalURI=https%3a%2f%2fsis.upm.edu.sa%2fpsc%2fps%2f&PortalHostNode=HRMS&NoCrumbs=yes&PortalKeyStruct=yes"  # Replace with actual grades endpoint
     
-    info = session.get(grades_url)
-
-    soup = BeautifulSoup(info.content, "html.parser")
-
-    tree = etree.HTML(str(soup))
+    if user_id not in logged_in_users:
+        await ctx.send("🔒 Please login first")
+        return
+    
     try:
-        response = Digi_session.get(grades_url).json()
-        if response['status']:
-            table_data = []
-            for item in response['data']:
-                course_name = item.get('course_name', 'N/A')
-                grade = item.get('grade', 'N/A')
-                table_data.append([course_name, grade])
-
-            table = tabulate(table_data, headers=['Course', 'Grade'], tablefmt='grid')
-            await ctx.send(f"```\n{table}\n```")
-        else:
-            await ctx.send("Failed to fetch grades. Please try again later.")
+        # Date calculations
+        today = datetime.now()
+        week_start = today - timedelta(days=today.weekday() + 1)
+        dates = [(week_start + timedelta(days=i)).date().isoformat() for i in range(5)]
+        
+        schedule_data = {}
+        digi_session = user_sessions[user_id]["digi"]
+        user_id_digi = user_sessions[user_id]["data"]["_id"]
+        
+        for i, date in enumerate(dates):
+            url = f"https://dsapi.produpm.digi-val.com/api/v1/digiclass/course_session/get-schedule-by-date/{user_id_digi}/{date}T21:00:00Z?timeZone=Asia/Riyadh"
+            response = digi_session.get(url).json()
+            schedule_data[date] = response.get('data', [])
+        
+        # Format and send schedule
+        for date, classes in schedule_data.items():
+            msg = f"📅 **{datetime.fromisoformat(date).strftime('%A')} Schedule**\n"
+            if classes:
+                for cls in classes:
+                    msg += (
+                        f"⏰ {cls['start']['hour']}:{cls['start']['minute']}{cls['start']['format']} - "
+                        f"{cls['end']['hour']}:{cls['end']['minute']}{cls['end']['format']}\n"
+                        f"📚 {cls.get('course_code', 'N/A')} - {cls.get('course_name', 'Unnamed')}\n\n"
+                    )
+            else:
+                msg += "🎉 No classes scheduled!\n"
+            
+            await ctx.send(msg[:2000])  # Respect Discord's message limit
+            
     except Exception as e:
-        await ctx.send(f"Error fetching grades: {str(e)}")
+        logging.error(f"Schedule error: {str(e)}")
+        await ctx.send("❌ Failed to fetch schedule")
 
 @bot.command()
 async def advisor(ctx):
-    """Command to fetch the academic advisor."""
-    if not login_response:
-        await ctx.send("Please log in first using the `/login` command.")
+    """Fetch academic advisor"""
+    user_id = str(ctx.author.id)
+    
+    if user_id not in logged_in_users:
+        await ctx.send("🔒 Please login first")
         return
+    
+    try:
+        sis_session = user_sessions[user_id]["sis"]
+        target_info = "https://sis.upm.edu.sa/psc/ps/EMPLOYEE/HRMS/c/SA_LEARNER_SERVICES.SSS_STUDENT_CENTER.GBL?NavColl=true&ICAGTarget=start"
+        info = sis_session.get(target_info)
+        soup = BeautifulSoup(info.content, "html.parser")
+        tree = etree.HTML(str(soup))
+        advisor = tree.xpath('//*[@id="DERIVED_SSS_SCL_NAME_DISPLAY$span$0"]')
 
-    target_info = "https://sis.upm.edu.sa/psc/ps/EMPLOYEE/HRMS/c/SA_LEARNER_SERVICES.SSS_STUDENT_CENTER.GBL?NavColl=true&ICAGTarget=start"
-    info = session.get(target_info)
-    soup = BeautifulSoup(info.content, "html.parser")
-    tree = etree.HTML(str(soup))
-    advisor = tree.xpath('//*[@id="DERIVED_SSS_SCL_NAME_DISPLAY$span$0"]')
-
-    if advisor:
-        advisor_name = advisor[0].text
-        await ctx.send(f"Your academic advisor is: {advisor_name}")
-    else:
-        await ctx.send("Unable to fetch advisor details.")
+        if advisor:
+            advisor_name = advisor[0].text
+            await ctx.send(f"👨‍🏫 Your academic advisor is: {advisor_name}")
+        else:
+            await ctx.send("❌ Unable to fetch advisor details")
+            
+    except Exception as e:
+        logging.error(f"Advisor error: {str(e)}")
+        await ctx.send("❌ Failed to fetch advisor")
 
 @bot.command()
 async def attendance(ctx):
-    """Command to fetch and display attendance."""
+    """Fetch attendance records"""
     user_id = str(ctx.author.id)
-
+    
     if user_id not in logged_in_users:
-        await ctx.send("Please log in first using the `/login` command.")
+        await ctx.send("🔒 Please login first")
         return
-
+    
     try:
-        # Get the user's unique identifier
-        user_data_response = Digi_session.get(f"https://dsapi.produpm.digi-val.com/api/v1/digiclass/user/{login_response['_id']}/data")
-        user_data = user_data_response.json()
+        digi_session = user_sessions[user_id]["digi"]
+        user_id_digi = user_sessions[user_id]["data"]["_id"]
+        
+        # Get calendar ID
+        url_calendar = f'https://dsapi.produpm.digi-val.com/api/v1/digiclass/course_session/userCalendars/{user_id_digi}/student'
+        calendar_response = digi_session.get(url_calendar)
+        calendar_id = calendar_response.json().get('data', [{}])[0].get('_id')
 
-        if not user_data:
-            await ctx.send("No attendance data available.")
-            return
+        # Get program IDs
+        programs_ids_url = f"https://dsapi.produpm.digi-val.com/api/v1/digiclass/course_session/userCourses/{user_id_digi}?institutionCalendarId={calendar_id}&type=student"
+        programs_response = digi_session.get(programs_ids_url).json().get('data', [])
+        programs_ids = [[p['_id'], p['_program_id'], p['course_code']] for p in programs_response]
 
-        attendance_data = user_data.get('attendance', [])
-        if attendance_data:
-            for course in attendance_data:
-                attended = course.get('attended', 0)
-                total = course.get('total', 0)
-                percentage = round((attended / total) * 100, 2) if total > 0 else 0
-                await ctx.send(f"Course: {course['name']}\nAttended: {attended}\nTotal: {total}\nAttendance Percentage: {percentage}%")
-        else:
-            await ctx.send("No attendance records found.")
+        def calculate_percentage(num1, num2):
+            return round((num1 / num2) * 100, 2) if num2 != 0 else None
+
+        # Fetch attendance details for each program
+        for program in programs_ids:
+            program_url = f"https://dsapi.produpm.digi-val.com/api/v1/digiclass/course_session/userCourseSessionDetails/{user_id_digi}/{program[0]}?institutionCalendarId={calendar_id}&type=student&level=Level%201&term=Fall-spring-summer&programId={program[1]}&year=year1"
+            program_data = digi_session.get(program_url).json().get('data', {})
+
+            # Retry with different term if data is not found
+            if not program_data.get('maleStudentCount'):
+                program_url = f"https://dsapi.produpm.digi-val.com/api/v1/digiclass/course_session/userCourseSessionDetails/{user_id_digi}/{program[0]}?institutionCalendarId={calendar_id}&type=student&level=Level%201&term=Regular&programId={program[1]}&year=year1"
+                program_data = digi_session.get(program_url).json().get('data', {})
+
+            if program_data:
+                # Extract attendance details
+                course_code = program[2]
+                attended_sessions = program_data.get('attendedSessions', 0)
+                completed_sessions = program_data.get('completedSessions', 0)
+                absent_count = program_data.get('absentCount', 0)
+                total_sessions = program_data.get('totalSessions', 0)
+
+                # Calculate percentages
+                attendance_percentage = calculate_percentage(attended_sessions, completed_sessions)
+                absence_percentage = round(absent_count / total_sessions * 100, 2) if total_sessions else 0
+
+                # Send attendance details to Discord
+                attendance_message = (
+                    f"📊 **Course Code: {course_code}**\n"
+                    f"✅ Attended: **{attended_sessions}** out of **{completed_sessions}** sessions\n"
+                    f"❌ Missed: **{absent_count}** sessions\n"
+                    f"📈 Attendance: **{attendance_percentage}%**\n"
+                    f"📉 Absence: **{absence_percentage}%**\n"
+                    f"------------------------------"
+                )
+                await ctx.send(attendance_message)
+            else:
+                await ctx.send(f"❌ Error fetching data for program {program[2]}")
+                
     except Exception as e:
-        await ctx.send(f"An error occurred while fetching attendance: {str(e)}")
-
-@bot.command()
-async def exams(ctx):
-    """Fetch and display the exam schedule."""
-    user_id = str(ctx.author.id)
-
-    if user_id not in logged_in_users:
-        await ctx.send("Please log in first using the `/login` command.")
-        return
-
-    try:
-        exam_url = f"https://dsapi.produpm.digi-val.com/api/v1/digiclass/user/{login_response['_id']}/exams"
-        response = Digi_session.get(exam_url)
-        exams = response.json().get('data', [])
-
-        if not exams:
-            await ctx.send("No exams found.")
-            return
-
-        exams_message = "**Exam Schedule:**\n"
-        for exam in exams:
-            exams_message += f"{exam['course_name']} - {exam['date']} at {exam['time']}\n"
-
-        await ctx.send(exams_message)
-    except Exception as e:
-        await ctx.send(f"An error occurred while fetching exam schedule: {str(e)}")
+        logging.error(f"Attendance error: {str(e)}")
+        await ctx.send("❌ Failed to fetch attendance")
 
 @bot.command()
 async def feedback(ctx, *, message):
-    """Submit feedback to the Bot owner."""
-    bot_owner_id = 360427220109623297
+    """Submit feedback to the bot owner"""
+    bot_owner_id = 360427220109623297  # Replace with your Discord ID
     bot_owner = await bot.fetch_user(bot_owner_id)
-
+    
     try:
-        await bot_owner.send(f"Feedback from {ctx.author.name}#{ctx.author.discriminator}:\n{message}")
-        await ctx.send("Thank you for your feedback!")
+        await bot_owner.send(f"📩 Feedback from {ctx.author.name}#{ctx.author.discriminator}:\n{message}")
+        await ctx.send("✅ Thank you for your feedback!")
     except Exception as e:
-        await ctx.send(f"An error occurred while sending feedback: {str(e)}")
-reminder_tasks = {}  # Dictionary to store active tasks for each user
+        logging.error(f"Feedback error: {str(e)}")
+        await ctx.send("❌ Failed to send feedback")
 
 @bot.command()
-async def remind(ctx, time: int, *, reminder: str):
-    """Set a reminder in minutes."""
-    if time <= 0:
-        await ctx.send("⛔ Please provide a valid time greater than 0.")
+async def exams(ctx):
+    """Fetch exam schedule"""
+    user_id = str(ctx.author.id)
+    
+    if user_id not in logged_in_users:
+        await ctx.send("🔒 Please login first")
         return
+    
+    try:
+        sis_session = user_sessions[user_id]["sis"]
+        exams_url = "https://sis.upm.edu.sa/psp/ps/EMPLOYEE/SA/c/SA_LEARNER_SERVICES.SSR_SSENRL_EXAM_L.GBL"
+        response = sis_session.get(exams_url)
 
-    user_id = ctx.author.id
-    channel_id = ctx.channel.id
-
-    # Function to send the reminder
-    async def send_reminder():
-        await asyncio.sleep(time * 60)  # Wait for the specified time
-        await ctx.send(f"⏰ **Reminder for <@{user_id}>:** {reminder}")
-        # Remove the completed task from reminder_tasks
-        if user_id in reminder_tasks:
-            reminder_tasks[user_id] = [task for task in reminder_tasks[user_id] if not task.done()]
-
-    # Create and start the reminder task
-    task = asyncio.create_task(send_reminder())
-    if user_id not in reminder_tasks:
-        reminder_tasks[user_id] = []
-    reminder_tasks[user_id].append(task)
-
-    await ctx.send(f"⏳ Reminder set for {time} minutes: **{reminder}**")
+        if response.status_code == 200:
+            exams = response.json()
+            exams_msg = "📝 **Exam Schedule:**\n"
+            for exam in exams:
+                exams_msg += f"📅 {exam['course_code']} - {exam['date']} at {exam['time']}\n"
+            await ctx.send(exams_msg)
+        else:
+            await ctx.send("❌ Unable to fetch exam schedule")
+            
+    except Exception as e:
+        logging.error(f"Exams error: {str(e)}")
+        await ctx.send("❌ Failed to fetch exam schedule")
 
 @bot.command()
-async def cancel_reminders(ctx):
-    """Cancel all reminders for the user."""
-    user_id = ctx.author.id
+async def remind(ctx, time: int, *, reminder):
+    """Set a reminder"""
+    try:
+        await ctx.send(f"⏰ Reminder set for {time} minutes: {reminder}")
+        await asyncio.sleep(time * 60)
+        await ctx.send(f"🔔 Reminder: {reminder}")
+    except Exception as e:
+        logging.error(f"Reminder error: {str(e)}")
+        await ctx.send("❌ Failed to set reminder")
 
-    if user_id not in reminder_tasks or not reminder_tasks[user_id]:
-        await ctx.send("⛔ You have no active reminders to cancel.")
-        return
-
-    # Cancel all tasks for the user
-    for task in reminder_tasks[user_id]:
-        task.cancel()
-    reminder_tasks[user_id] = []
-
-    await ctx.send(f"✅ All your reminders have been canceled, <@{user_id}>.")
-
-# Finish by running the bot
-bot.run("MTMyNDEyMjY4NTk1NzA3OTE1Mg.Gw3xTb.TN2Xxdw7VEl5a_jdfzFAmR3OrLfJZkXt4MBcJo")
+# Run the bot
+bot.run("MTMyNDEyMjY4NTk1NzA3OTE1Mg.Gw3xTb.TN2Xxdw7VEl5a_jdfzFAmR3OrLfJZkXt4MBcJo")  # Replace with your actual token
